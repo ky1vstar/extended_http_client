@@ -1,0 +1,6 @@
+include: package:lint/package.yaml
+
+analyzer:
+  exclude:
+    - lib/src/http/dart_sdk_http/**
+    - lib/src/http/dart_sdk_internal/**
