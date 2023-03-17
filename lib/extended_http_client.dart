@@ -4,5 +4,6 @@
 library extended_http_client;
 
 export 'src/extended_http_client.dart';
-
-// TODO: Export any libraries intended for clients of this package.
+export 'src/ntlm/ntlm_auth_identity_credentials.dart';
+export 'src/ntlm/ntlm_credentials.dart';
+export 'src/sspi/ntlm_sspi_credentials.dart';

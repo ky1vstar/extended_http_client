@@ -1,0 +1,44 @@
+# Run with `dart run ffigen --config ffigen_configs/ffigen_sspi.yaml`.
+name: SspiBindings
+description: |
+  Bindings for `Sspi.h`.
+
+  Regenerate bindings with `dart run ffigen --config ffigen_configs/ffigen_sspi.yaml`.
+output: '../lib/src/sspi/bindings.g.dart'
+headers:
+  entry-points:
+    - '../headers/sspi.h'
+    - '../headers/winerror.h'
+compiler-opts:
+  - '-DISSP_MODE=1'
+  - '-I "C:\cygwin64\usr\include"'
+preamble: |
+  // ignore_for_file: type=lint
+  export 'binding_shims.dart';
+exclude-all-by-default: true
+functions:
+  include:
+    - AcquireCredentialsHandleW
+    - InitializeSecurityContextW
+    - CompleteAuthToken
+    - FreeCredentialsHandle
+    - FreeContextBuffer
+structs:
+  rename:
+    '_(.*)': '$1'
+macros:
+  include:
+    - 'SECPKG_.*'
+    - 'ISC_REQ_.*'
+    - 'SECURITY_.*'
+    - 'SEC_I_.*'
+    - 'SEC_E_.*'
+    - 'SECBUFFER_.*'
+library-imports:
+  shims: 'binding_shims.dart'
+type-map:
+  structs:
+    _SecHandle:
+      lib: 'shims'
+      c-type: 'SecHandle'
+      dart-type: 'SecHandle'

@@ -8,4 +8,4 @@
 8. Copy static method `HttpDate._parseCookieDate` from dart-sdk/sdk/lib/_http/http_date.dart as top level method `_HttpDate_parseCookieDate` to dart_sdk_http/http_date.dart
 9. Copy `checkNotNullable` method, `NotNullableError` class and `valueOfNonNullableParamWithDefault` method from sdk/lib/internal/internal.dart -> dart_sdk_internal/internal.dart
 10. dart_sdk_http/http_impl.dart: comment out `_HttpServer.bind` and `_HttpServer.bindSecure` static methods
-11. dart_sdk_http/http_impl.dart: let `_HttpClient` implement `ExHttpClient`
+11. dart_sdk_http/http_impl.dart: let `_HttpClient` implement `HttpClientEx`
