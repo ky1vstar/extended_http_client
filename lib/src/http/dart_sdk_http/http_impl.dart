@@ -2576,7 +2576,8 @@ class _HttpClient implements HttpClientEx {
   Future<bool> Function(Uri, String scheme, String? realm)? _authenticate;
   Future<bool> Function(String host, int port, String scheme, String? realm)?
       _authenticateProxy;
-  String Function(Uri)? _findProxy = HttpClient.findProxyFromEnvironment;
+  FutureOr<String> Function(Uri)? _findProxy =
+      HttpClient.findProxyFromEnvironment;
   Duration _idleTimeout = const Duration(seconds: 15);
   BadCertificateCallback? _badCertificateCallback;
   Function(String line)? _keyLog;
@@ -2711,6 +2712,8 @@ class _HttpClient implements HttpClientEx {
 
   set findProxy(String Function(Uri uri)? f) => _findProxy = f;
 
+  set findProxyAsync(FutureOr<String> Function(Uri url)? f) => _findProxy = f;
+
   static void _startRequestTimelineEvent(
       TimelineTask? timeline, String method, Uri uri) {
     timeline?.start('HTTP CLIENT ${method.toUpperCase()}', arguments: {
@@ -2753,7 +2756,7 @@ class _HttpClient implements HttpClientEx {
     return true;
   }
 
-  Future<_HttpClientRequest> _openUrl(String method, Uri uri) {
+  Future<_HttpClientRequest> _openUrl(String method, Uri uri) async {
     if (_closing) {
       throw StateError("Client is closed");
     }
@@ -2792,7 +2795,8 @@ class _HttpClient implements HttpClientEx {
       // TODO(sgjesse): Keep a map of these as normally only a few
       // configuration strings will be used.
       try {
-        proxyConf = _ProxyConfiguration(findProxy(uri));
+        var proxy = findProxy(uri);
+        proxyConf = _ProxyConfiguration(proxy is String ? proxy : await proxy);
       } catch (error, stackTrace) {
         return Future.error(error, stackTrace);
       }

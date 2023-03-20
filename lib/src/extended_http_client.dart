@@ -2,6 +2,7 @@
 
 import 'dart:io';
 
+import 'package:delayed_proxy_http_client/delayed_proxy_http_client.dart';
 import 'package:extended_http_client/extended_http_client.dart';
 import 'package:extended_http_client/src/http/http.dart';
 
@@ -10,7 +11,7 @@ class Awesome {
   bool get isAwesome => true;
 }
 
-abstract class HttpClientEx implements HttpClient {
+abstract class HttpClientEx implements DelayedProxyHttpClient {
   factory HttpClientEx({SecurityContext? context}) => createHttpClient(context);
 }
 
