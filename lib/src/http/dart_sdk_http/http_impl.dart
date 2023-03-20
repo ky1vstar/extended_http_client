@@ -729,7 +729,7 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
     List<String>? challenge = headers[HttpHeaders.proxyAuthenticateHeader];
     return statusCode == HttpStatus.proxyAuthenticationRequired &&
         challenge != null &&
-        challenge.length == 1;
+        challenge.isNotEmpty;
   }
 
   bool get _shouldAuthenticate {
@@ -737,7 +737,7 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
     List<String>? challenge = headers[HttpHeaders.wwwAuthenticateHeader];
     return statusCode == HttpStatus.unauthorized &&
         challenge != null &&
-        challenge.length == 1;
+        challenge.isNotEmpty;
   }
 
   Future<HttpClientResponse> _authenticate(bool proxyAuth) {
@@ -795,12 +795,23 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
     }
 
     List<String> challenge = authChallenge()!;
-    assert(challenge.length == 1);
-    _HeaderValue header =
-        _HeaderValue.parse(challenge[0], parameterSeparator: ",");
-    _AuthenticationScheme scheme =
-        _AuthenticationScheme.fromString(header.value);
-    String? realm = header.parameters["realm"];
+    assert(challenge.isNotEmpty);
+    late String rawHeader;
+    late _HeaderValue header;
+    _AuthenticationScheme scheme = _AuthenticationScheme.UNKNOWN;
+    String? realm;
+    for (final current in challenge) {
+      final currentHeader =
+          _HeaderValue.parse(current, parameterSeparator: ",");
+      final currentScheme =
+          _AuthenticationScheme.fromString(currentHeader.value);
+      if (currentScheme._scheme >= scheme._scheme) {
+        rawHeader = current;
+        header = currentHeader;
+        scheme = currentScheme;
+        realm = header.parameters["realm"];
+      }
+    }
 
     // See if any matching credentials are available.
     var cr = findCredentials(scheme);
@@ -839,6 +850,33 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
               return retry();
             }
           }
+        }
+      }
+
+      if (cr.scheme == _AuthenticationScheme.NTLM) {
+        final connectionHashCode = _httpRequest._httpClientConnection.hashCode;
+        if (cr.connectionHashCode == null ||
+            cr.connectionHashCode == connectionHashCode) {
+          // If the connection is not set then this is the first authenticate
+          // response for these credentials. Set up authentication state.
+          if (cr.connectionHashCode == null) {
+            cr.connectionHashCode = connectionHashCode;
+          }
+          final priorChallenge = cr.challenge;
+          // Challenge is optional and whitespace separated from the scheme.
+          if (rawHeader.length > 5) {
+            final challengeBase64 = rawHeader.substring(5);
+            cr.challenge = base64Decode(challengeBase64.trim());
+          } else {
+            cr.challenge = null;
+          }
+          // An empty challenge returned after at least one non-empty challenge
+          // means that the credentials are invalid.
+          if (priorChallenge != null && cr.challenge == null) {
+            return Future.value(this);
+          }
+          // Credentials were found, prepare for retrying the request.
+          return retry();
         }
       }
     }
@@ -3546,18 +3584,21 @@ class _AuthenticationScheme {
   static const UNKNOWN = _AuthenticationScheme(-1);
   static const BASIC = _AuthenticationScheme(0);
   static const DIGEST = _AuthenticationScheme(1);
+  static const NTLM = _AuthenticationScheme(2);
 
   const _AuthenticationScheme(this._scheme);
 
   factory _AuthenticationScheme.fromString(String scheme) {
     if (scheme.toLowerCase() == "basic") return BASIC;
     if (scheme.toLowerCase() == "digest") return DIGEST;
+    if (scheme.toLowerCase() == "ntlm") return NTLM;
     return UNKNOWN;
   }
 
   String toString() {
     if (this == BASIC) return "Basic";
     if (this == DIGEST) return "Digest";
+    if (this == NTLM) return "NTLM";
     return "Unknown";
   }
 }
@@ -3574,6 +3615,11 @@ abstract class _Credentials {
   String? qop;
   int? nonceCount;
 
+  // NTLM specific fields
+  int? connectionHashCode;
+  NtlmSecurityContext? securityContext;
+  Uint8List? challenge;
+
   _Credentials(this.credentials, this.realm) {
     if (credentials.scheme == _AuthenticationScheme.DIGEST) {
       // Calculate the H(A1) value once. There is no mentioning of
@@ -3582,7 +3628,7 @@ abstract class _Credentials {
       // the WWW-Authenticate and Proxy-Authenticate headers, see
       // http://tools.ietf.org/html/draft-reschke-basicauth-enc-06. For
       // now always use UTF-8 encoding.
-      var creds = credentials as _HttpClientDigestCredentials;
+      var creds = credentials as _HttpClientExDigestCredentials;
       var hasher = _MD5()
         ..add(utf8.encode(creds.username))
         ..add([_CharCode.COLON])
@@ -3590,6 +3636,10 @@ abstract class _Credentials {
         ..add([_CharCode.COLON])
         ..add(utf8.encode(creds.password));
       ha1 = _CryptoUtils.bytesToHex(hasher.close());
+    }
+    if (credentials.scheme == _AuthenticationScheme.NTLM) {
+      final creds = credentials as _HttpClientNtlmCredentials;
+      securityContext = creds.credentials.initializeSecurityContext();
     }
   }
 
@@ -3620,6 +3670,12 @@ class _SiteCredentials extends _Credentials {
     if (credentials.scheme == _AuthenticationScheme.DIGEST && nonce == null) {
       return;
     }
+    // NTLM credentials cannot be used without cached connection.
+    if (credentials.scheme == _AuthenticationScheme.NTLM &&
+        connectionHashCode !=
+            (request as _HttpClientRequest)._httpClientConnection.hashCode) {
+      return;
+    }
     credentials.authorize(this, request as _HttpClientRequest);
     used = true;
   }
@@ -3643,22 +3699,28 @@ class _ProxyCredentials extends _Credentials {
     if (credentials.scheme == _AuthenticationScheme.DIGEST && nonce == null) {
       return;
     }
+    // NTLM credentials cannot be used without cached connection.
+    if (credentials.scheme == _AuthenticationScheme.NTLM &&
+        connectionHashCode !=
+            (request as _HttpClientRequest)._httpClientConnection.hashCode) {
+      return;
+    }
     credentials.authorizeProxy(this, request as _HttpClientRequest);
   }
 }
 
-abstract class _HttpClientCredentials implements HttpClientCredentials {
+abstract class _HttpClientCredentials implements HttpClientExCredentials {
   _AuthenticationScheme get scheme;
   void authorize(_Credentials credentials, _HttpClientRequest request);
   void authorizeProxy(_ProxyCredentials credentials, HttpClientRequest request);
 }
 
-class _HttpClientBasicCredentials extends _HttpClientCredentials
-    implements HttpClientBasicCredentials {
+class _HttpClientExBasicCredentials extends _HttpClientCredentials
+    implements HttpClientExBasicCredentials {
   String username;
   String password;
 
-  _HttpClientBasicCredentials(this.username, this.password);
+  _HttpClientExBasicCredentials(this.username, this.password);
 
   _AuthenticationScheme get scheme => _AuthenticationScheme.BASIC;
 
@@ -3682,12 +3744,12 @@ class _HttpClientBasicCredentials extends _HttpClientCredentials
   }
 }
 
-class _HttpClientDigestCredentials extends _HttpClientCredentials
-    implements HttpClientDigestCredentials {
+class _HttpClientExDigestCredentials extends _HttpClientCredentials
+    implements HttpClientExDigestCredentials {
   String username;
   String password;
 
-  _HttpClientDigestCredentials(this.username, this.password);
+  _HttpClientExDigestCredentials(this.username, this.password);
 
   _AuthenticationScheme get scheme => _AuthenticationScheme.DIGEST;
 
@@ -3755,6 +3817,33 @@ class _HttpClientDigestCredentials extends _HttpClientCredentials
       _ProxyCredentials credentials, HttpClientRequest request) {
     request.headers.set(HttpHeaders.proxyAuthorizationHeader,
         authorization(credentials, request as _HttpClientRequest));
+  }
+}
+
+class _HttpClientNtlmCredentials extends _HttpClientCredentials
+    implements HttpClientExNtlmCredentials {
+  final NtlmCredentials credentials;
+
+  _HttpClientNtlmCredentials(this.credentials);
+
+  _AuthenticationScheme get scheme => _AuthenticationScheme.NTLM;
+
+  String authorization(_Credentials credentials) {
+    final token =
+        credentials.securityContext!.getTokenBytes(credentials.challenge);
+    String auth = base64Encode(token);
+    return "NTLM $auth";
+  }
+
+  void authorize(_Credentials credentials, HttpClientRequest request) {
+    request.headers
+        .set(HttpHeaders.authorizationHeader, authorization(credentials));
+  }
+
+  void authorizeProxy(
+      _ProxyCredentials credentials, HttpClientRequest request) {
+    request.headers
+        .set(HttpHeaders.proxyAuthorizationHeader, authorization(credentials));
   }
 }
 

@@ -11,7 +11,7 @@ class NtlmSspiCredentials implements NtlmCredentials {
 }
 
 class NtlmSspiSecurityContext implements NtlmSecurityContext {
-  static final _dylib = DynamicLibrary.open('Secur32.dll');
+  static final _dylib = DynamicLibrary.open("Secur32.dll");
   static final _sspi = SspiBindings(_dylib);
 
   static final Pointer<SecHandle> _credentials = (() {
@@ -34,7 +34,7 @@ class NtlmSspiSecurityContext implements NtlmSecurityContext {
       print("AcquireCredentialsHandleW status $status");
 
       if (status != SEC_E_OK) {
-        throw StateError('Status #1 $status');
+        throw StateError("Status #1 $status");
       }
 
       return credentials;
@@ -48,9 +48,13 @@ class NtlmSspiSecurityContext implements NtlmSecurityContext {
 
   final _context = calloc<SecHandle>();
   var _hasContext = false;
+  var _isDisposed = false;
 
   @override
   Uint8List getTokenBytes(Uint8List? challengeBytes) {
+    assert(!_isDisposed);
+    if (_isDisposed) return Uint8List(0);
+
     return using((arena) {
       var challengeDesc = nullptr.cast<SecBufferDesc>();
       if (challengeBytes != null) {
@@ -106,7 +110,7 @@ class NtlmSspiSecurityContext implements NtlmSecurityContext {
         _sspi.CompleteAuthToken(_context, tokenDesc);
       } else if (status != SEC_E_OK) {
         _sspi.FreeCredentialsHandle(_context);
-        throw StateError('Status #2 $status');
+        throw StateError("Status #2 $status");
       }
       _hasContext = true;
 
@@ -119,6 +123,8 @@ class NtlmSspiSecurityContext implements NtlmSecurityContext {
 
   @override
   void dispose() {
+    if (_isDisposed) return;
+    _isDisposed = true;
     if (_hasContext) {
       _sspi.FreeCredentialsHandle(_context);
     }

@@ -7,7 +7,15 @@ import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 
-import 'package:extended_http_client/extended_http_client.dart' show HttpClientEx;
+import 'package:extended_http_client/extended_http_client.dart'
+    show
+        HttpClientEx,
+        HttpClientExCredentials,
+        HttpClientExBasicCredentials,
+        HttpClientExDigestCredentials,
+        HttpClientExNtlmCredentials,
+        NtlmCredentials,
+        NtlmSecurityContext;
 
 part 'dart_sdk_http/crypto.dart';
 part 'dart_sdk_http/embedder_config.dart';
@@ -19,3 +27,12 @@ part 'dart_sdk_http/http_session.dart';
 part 'dart_sdk_internal/internal.dart';
 
 HttpClientEx createHttpClient(SecurityContext? context) => _HttpClient(context);
+
+HttpClientExBasicCredentials createHttpClientBasicCredentials(String username, String password) =>
+    _HttpClientExBasicCredentials(username, password);
+
+HttpClientExDigestCredentials createHttpClientDigestCredentials(String username, String password) =>
+    _HttpClientExDigestCredentials(username, password);
+
+HttpClientExNtlmCredentials createHttpClientNtlmCredentials(NtlmCredentials credentials) =>
+    _HttpClientNtlmCredentials(credentials);
