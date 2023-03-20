@@ -2687,6 +2687,11 @@ class _HttpClient implements HttpClientEx {
   }
 
   void addCredentials(Uri url, String realm, HttpClientCredentials cr) {
+    addCredentialsEx(url, realm, _HttpClientCredentials.fromDartIo(cr));
+  }
+
+  @override
+  void addCredentialsEx(Uri url, String realm, HttpClientExCredentials cr) {
     _credentials
         .add(_SiteCredentials(url, realm, cr as _HttpClientCredentials));
   }
@@ -2700,6 +2705,12 @@ class _HttpClient implements HttpClientEx {
 
   void addProxyCredentials(
       String host, int port, String realm, HttpClientCredentials cr) {
+    addProxyCredentialsEx(
+        host, port, realm, _HttpClientCredentials.fromDartIo(cr));
+  }
+
+  void addProxyCredentialsEx(
+      String host, int port, String realm, HttpClientExCredentials cr) {
     _proxyCredentials.add(
         _ProxyCredentials(host, port, realm, cr as _HttpClientCredentials));
   }
@@ -3714,6 +3725,19 @@ class _ProxyCredentials extends _Credentials {
 }
 
 abstract class _HttpClientCredentials implements HttpClientExCredentials {
+  static _HttpClientCredentials fromDartIo(HttpClientCredentials credentials) {
+    dynamic creds = credentials;
+    if (credentials is _HttpClientCredentials) {
+      return credentials;
+    } else if (credentials is HttpClientBasicCredentials) {
+      return _HttpClientExBasicCredentials(creds.username, creds.password);
+    } else if (credentials is HttpClientDigestCredentials) {
+      return _HttpClientExDigestCredentials(creds.username, creds.password);
+    } else {
+      throw UnsupportedError("${credentials.runtimeType} is not supported.");
+    }
+  }
+
   _AuthenticationScheme get scheme;
   void authorize(_Credentials credentials, _HttpClientRequest request);
   void authorizeProxy(_ProxyCredentials credentials, HttpClientRequest request);

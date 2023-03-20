@@ -13,6 +13,22 @@ class Awesome {
 
 abstract class HttpClientEx implements DelayedProxyHttpClient {
   factory HttpClientEx({SecurityContext? context}) => createHttpClient(context);
+
+  /// Add credentials to be used for authorizing HTTP requests.
+  @override
+  @Deprecated("Use addCredentialsEx instead.")
+  void addCredentials(Uri url, String realm, HttpClientCredentials credentials);
+
+  /// Add credentials to be used for authorizing HTTP requests.
+  void addCredentialsEx(Uri url, String realm, HttpClientExCredentials credentials);
+
+  /// Add credentials to be used for authorizing HTTP proxies.
+  @override
+  @Deprecated("Use addProxyCredentialsEx instead.")
+  void addProxyCredentials(String host, int port, String realm, HttpClientCredentials credentials);
+
+  /// Add credentials to be used for authorizing HTTP proxies.
+  void addProxyCredentialsEx(String host, int port, String realm, HttpClientExCredentials credentials);
 }
 
 abstract class HttpClientExCredentials implements HttpClientCredentials {}
