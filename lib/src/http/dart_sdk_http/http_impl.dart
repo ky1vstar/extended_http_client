@@ -2066,6 +2066,7 @@ class _HttpClientConnection {
   Timer? _idleTimer;
   bool closed = false;
   Uri? _currentUri;
+  NtlmSecurityContext? currentSecurityContext;
 
   Completer<_HttpIncoming>? _nextResponseCompleter;
   Future<Socket>? _streamFuture;
@@ -2295,28 +2296,32 @@ class _HttpClientConnection {
     closed = true;
     _httpClient._connectionClosed(this);
     _socket.destroy();
+    currentSecurityContext?.dispose();
   }
 
   void destroyFromExternal() {
     closed = true;
     _httpClient._connectionClosedNoFurtherClosing(this);
     _socket.destroy();
+    currentSecurityContext?.dispose();
   }
 
   void close() {
     closed = true;
     _httpClient._connectionClosed(this);
-    _streamFuture!
-        .timeout(_httpClient.idleTimeout)
-        .then((_) => _socket.destroy());
+    _streamFuture!.timeout(_httpClient.idleTimeout).then((_) {
+      _socket.destroy();
+      currentSecurityContext?.dispose();
+    });
   }
 
   void closeFromExternal() {
     closed = true;
     _httpClient._connectionClosedNoFurtherClosing(this);
-    _streamFuture!
-        .timeout(_httpClient.idleTimeout)
-        .then((_) => _socket.destroy());
+    _streamFuture!.timeout(_httpClient.idleTimeout).then((_) {
+      _socket.destroy();
+      currentSecurityContext?.dispose();
+    });
   }
 
   Future<_HttpClientConnection> createProxyTunnel(
@@ -3892,6 +3897,8 @@ class _HttpClientNtlmCredentials extends _HttpClientCredentials
     }
     credentials.used = true;
     credentials.connectionHashCode = request.connectionHashCode;
+    request._httpClientConnection.currentSecurityContext =
+        credentials.securityContext;
 
     final token =
         credentials.securityContext!.getTokenBytes(credentials.challenge);
