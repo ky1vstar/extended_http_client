@@ -741,7 +741,7 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
     List<String>? challenge = headers[HttpHeaders.proxyAuthenticateHeader];
     return statusCode == HttpStatus.proxyAuthenticationRequired &&
         challenge != null &&
-        challenge.length == 1;
+        challenge.isNotEmpty;
   }
 
   bool get _shouldAuthenticate {
@@ -749,7 +749,7 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
     List<String>? challenge = headers[HttpHeaders.wwwAuthenticateHeader];
     return statusCode == HttpStatus.unauthorized &&
         challenge != null &&
-        challenge.length == 1;
+        challenge.isNotEmpty;
   }
 
   Future<HttpClientResponse> _authenticate(bool proxyAuth) {
@@ -772,10 +772,13 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
           : headers[HttpHeaders.wwwAuthenticateHeader];
     }
 
-    _Credentials? findCredentials(_AuthenticationScheme scheme) {
+    _Credentials? findCredentials(
+        _AuthenticationScheme scheme, int connectionHashCode) {
       return proxyAuth
-          ? _httpClient._findProxyCredentials(_httpRequest._proxy, scheme)
-          : _httpClient._findCredentials(_httpRequest.uri, scheme);
+          ? _httpClient._findProxyCredentials(
+              _httpRequest._proxy, scheme, connectionHashCode)
+          : _httpClient._findCredentials(
+              _httpRequest.uri, scheme, connectionHashCode);
     }
 
     void removeCredentials(_Credentials cr) {
@@ -807,15 +810,26 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
     }
 
     List<String> challenge = authChallenge()!;
-    assert(challenge.length == 1);
-    _HeaderValue header =
-        _HeaderValue.parse(challenge[0], parameterSeparator: ",");
-    _AuthenticationScheme scheme =
-        _AuthenticationScheme.fromString(header.value);
-    String? realm = header.parameters["realm"];
+    assert(challenge.isNotEmpty);
+    late String rawHeader;
+    late _HeaderValue header;
+    _AuthenticationScheme scheme = _AuthenticationScheme.UNKNOWN;
+    String? realm;
+    for (final current in challenge) {
+      final currentHeader =
+          _HeaderValue.parse(current, parameterSeparator: ",");
+      final currentScheme =
+          _AuthenticationScheme.fromString(currentHeader.value);
+      if (currentScheme._scheme >= scheme._scheme) {
+        rawHeader = current;
+        header = currentHeader;
+        scheme = currentScheme;
+        realm = header.parameters["realm"];
+      }
+    }
 
     // See if any matching credentials are available.
-    var cr = findCredentials(scheme);
+    var cr = findCredentials(scheme, _httpRequest.connectionHashCode);
     if (cr != null) {
       // For basic authentication don't retry already used credentials
       // as they must have already been added to the request causing
@@ -852,6 +866,28 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
             }
           }
         }
+      }
+
+      if (cr.scheme == _AuthenticationScheme.NTLM) {
+        final priorChallenge = cr.challenge;
+        // Challenge is optional and whitespace separated from the scheme.
+        if (rawHeader.length > 5) {
+          final challengeBase64 = rawHeader.substring(5);
+          cr.challenge = base64Decode(challengeBase64.trim());
+        } else {
+          cr.challenge = null;
+        }
+        // An empty challenge returned after at least one non-empty challenge
+        // means that the credentials are invalid.
+        if (priorChallenge != null && cr.challenge == null) {
+          return Future.value(this);
+        }
+        // Mark credentials as unused so that security context can continue
+        // the flow.
+        cr.used = false;
+        cr.shouldAuthenticate = true;
+        // Credentials were found, prepare for retrying the request.
+        return retry();
       }
     }
 
@@ -2042,6 +2078,7 @@ class _HttpClientConnection {
   Timer? _idleTimer;
   bool closed = false;
   Uri? _currentUri;
+  NtlmSecurityContext? currentSecurityContext;
 
   Completer<_HttpIncoming>? _nextResponseCompleter;
   Future<Socket>? _streamFuture;
@@ -2153,7 +2190,8 @@ class _HttpClientConnection {
           base64Encode(utf8.encode("${proxy.username}:${proxy.password}"));
       request.headers.set(HttpHeaders.proxyAuthorizationHeader, "Basic $auth");
     } else if (!proxy.isDirect && _httpClient._proxyCredentials.isNotEmpty) {
-      proxyCreds = _httpClient._findProxyCredentials(proxy);
+      proxyCreds = _httpClient._findProxyCredentials(
+          proxy, null, request.connectionHashCode);
       if (proxyCreds != null) {
         proxyCreds.authorize(request);
       }
@@ -2231,6 +2269,21 @@ class _HttpClientConnection {
             if (nextnonce != null) creds.nonce = nextnonce;
           }
         }
+        // For NTLM authentication check if the server has authenticated us.
+        if (creds != null && creds.scheme == _AuthenticationScheme.NTLM) {
+          if (incoming.statusCode != null &&
+              incoming.statusCode != HttpStatus.unauthorized) {
+            creds.shouldAuthenticate = false;
+          }
+        }
+        // For NTLM authentication check if the proxy has authenticated us.
+        if (proxyCreds != null &&
+            proxyCreds.scheme == _AuthenticationScheme.NTLM) {
+          if (incoming.statusCode != null &&
+              incoming.statusCode != HttpStatus.proxyAuthenticationRequired) {
+            proxyCreds.shouldAuthenticate = false;
+          }
+        }
         request._onIncoming(incoming);
       })
           // If we see a state error, we failed to get the 'first'
@@ -2263,28 +2316,32 @@ class _HttpClientConnection {
     closed = true;
     _httpClient._connectionClosed(this);
     _socket.destroy();
+    currentSecurityContext?.dispose();
   }
 
   void destroyFromExternal() {
     closed = true;
     _httpClient._connectionClosedNoFurtherClosing(this);
     _socket.destroy();
+    currentSecurityContext?.dispose();
   }
 
   void close() {
     closed = true;
     _httpClient._connectionClosed(this);
-    _streamFuture!
-        .timeout(_httpClient.idleTimeout)
-        .then((_) => _socket.destroy());
+    _streamFuture!.timeout(_httpClient.idleTimeout).then((_) {
+      _socket.destroy();
+      currentSecurityContext?.dispose();
+    });
   }
 
   void closeFromExternal() {
     closed = true;
     _httpClient._connectionClosedNoFurtherClosing(this);
-    _streamFuture!
-        .timeout(_httpClient.idleTimeout)
-        .then((_) => _socket.destroy());
+    _streamFuture!.timeout(_httpClient.idleTimeout).then((_) {
+      _socket.destroy();
+      currentSecurityContext?.dispose();
+    });
   }
 
   Future<_HttpClientConnection> createProxyTunnel(
@@ -2556,7 +2613,8 @@ class _HttpClient implements HttpClientEx {
   Future<bool> Function(Uri, String scheme, String? realm)? _authenticate;
   Future<bool> Function(String host, int port, String scheme, String? realm)?
       _authenticateProxy;
-  String Function(Uri)? _findProxy = HttpClient.findProxyFromEnvironment;
+  FutureOr<String> Function(Uri)? _findProxy =
+      HttpClient.findProxyFromEnvironment;
   Duration _idleTimeout = const Duration(seconds: 15);
   BadCertificateCallback? _badCertificateCallback;
   Function(String line)? _keyLog;
@@ -2666,6 +2724,11 @@ class _HttpClient implements HttpClientEx {
   }
 
   void addCredentials(Uri url, String realm, HttpClientCredentials cr) {
+    addCredentialsEx(url, realm, _HttpClientCredentials.fromDartIo(cr));
+  }
+
+  @override
+  void addCredentialsEx(Uri url, String realm, HttpClientExCredentials cr) {
     _credentials
         .add(_SiteCredentials(url, realm, cr as _HttpClientCredentials));
   }
@@ -2679,6 +2742,12 @@ class _HttpClient implements HttpClientEx {
 
   void addProxyCredentials(
       String host, int port, String realm, HttpClientCredentials cr) {
+    addProxyCredentialsEx(
+        host, port, realm, _HttpClientCredentials.fromDartIo(cr));
+  }
+
+  void addProxyCredentialsEx(
+      String host, int port, String realm, HttpClientExCredentials cr) {
     _proxyCredentials.add(
         _ProxyCredentials(host, port, realm, cr as _HttpClientCredentials));
   }
@@ -2690,6 +2759,8 @@ class _HttpClient implements HttpClientEx {
       _connectionFactory = f;
 
   set findProxy(String Function(Uri uri)? f) => _findProxy = f;
+
+  set findProxyAsync(FutureOr<String> Function(Uri url)? f) => _findProxy = f;
 
   static void _startRequestTimelineEvent(
       TimelineTask? timeline, String method, Uri uri) {
@@ -2733,7 +2804,7 @@ class _HttpClient implements HttpClientEx {
     return true;
   }
 
-  Future<_HttpClientRequest> _openUrl(String method, Uri uri) {
+  Future<_HttpClientRequest> _openUrl(String method, Uri uri) async {
     if (_closing) {
       throw StateError("Client is closed");
     }
@@ -2772,7 +2843,8 @@ class _HttpClient implements HttpClientEx {
       // TODO(sgjesse): Keep a map of these as normally only a few
       // configuration strings will be used.
       try {
-        proxyConf = _ProxyConfiguration(findProxy(uri));
+        var proxy = findProxy(uri);
+        proxyConf = _ProxyConfiguration(proxy is String ? proxy : await proxy);
       } catch (error, stackTrace) {
         return Future.error(error, stackTrace);
       }
@@ -2929,12 +3001,13 @@ class _HttpClient implements HttpClientEx {
     return connect(HttpException("No proxies given"), StackTrace.current);
   }
 
-  _SiteCredentials? _findCredentials(Uri url, [_AuthenticationScheme? scheme]) {
+  _SiteCredentials? _findCredentials(Uri url,
+      [_AuthenticationScheme? scheme, int? connectionHashCode]) {
     // Look for credentials.
     _SiteCredentials? cr =
         _credentials.fold(null, (_SiteCredentials? prev, value) {
       var siteCredentials = value as _SiteCredentials;
-      if (siteCredentials.applies(url, scheme)) {
+      if (siteCredentials.applies(url, scheme, connectionHashCode)) {
         if (prev == null) return value;
         return siteCredentials.uri.path.length > prev.uri.path.length
             ? siteCredentials
@@ -2947,10 +3020,10 @@ class _HttpClient implements HttpClientEx {
   }
 
   _ProxyCredentials? _findProxyCredentials(_Proxy proxy,
-      [_AuthenticationScheme? scheme]) {
+      [_AuthenticationScheme? scheme, int? connectionHashCode]) {
     // Look for credentials.
     for (var current in _proxyCredentials) {
-      if (current.applies(proxy, scheme)) {
+      if (current.applies(proxy, scheme, connectionHashCode)) {
         return current;
       }
     }
@@ -3565,18 +3638,21 @@ class _AuthenticationScheme {
   static const UNKNOWN = _AuthenticationScheme(-1);
   static const BASIC = _AuthenticationScheme(0);
   static const DIGEST = _AuthenticationScheme(1);
+  static const NTLM = _AuthenticationScheme(2);
 
   const _AuthenticationScheme(this._scheme);
 
   factory _AuthenticationScheme.fromString(String scheme) {
     if (scheme.toLowerCase() == "basic") return BASIC;
     if (scheme.toLowerCase() == "digest") return DIGEST;
+    if (scheme.toLowerCase() == "ntlm") return NTLM;
     return UNKNOWN;
   }
 
   String toString() {
     if (this == BASIC) return "Basic";
     if (this == DIGEST) return "Digest";
+    if (this == NTLM) return "NTLM";
     return "Unknown";
   }
 }
@@ -3593,6 +3669,12 @@ abstract class _Credentials {
   String? qop;
   int? nonceCount;
 
+  // NTLM specific fields
+  int? connectionHashCode;
+  NtlmSecurityContext? securityContext;
+  bool shouldAuthenticate = true;
+  Uint8List? challenge;
+
   _Credentials(this.credentials, this.realm) {
     if (credentials.scheme == _AuthenticationScheme.DIGEST) {
       // Calculate the H(A1) value once. There is no mentioning of
@@ -3601,7 +3683,7 @@ abstract class _Credentials {
       // the WWW-Authenticate and Proxy-Authenticate headers, see
       // http://tools.ietf.org/html/draft-reschke-basicauth-enc-06. For
       // now always use UTF-8 encoding.
-      var creds = credentials as _HttpClientDigestCredentials;
+      var creds = credentials as _HttpClientExDigestCredentials;
       var hasher = _MD5()
         ..add(utf8.encode(creds.username))
         ..add([_CharCode.COLON])
@@ -3609,6 +3691,10 @@ abstract class _Credentials {
         ..add([_CharCode.COLON])
         ..add(utf8.encode(creds.password));
       ha1 = _CryptoUtils.bytesToHex(hasher.close());
+    }
+    if (credentials.scheme == _AuthenticationScheme.NTLM) {
+      final creds = credentials as _HttpClientNtlmCredentials;
+      securityContext = creds.credentials.initializeSecurityContext();
     }
   }
 
@@ -3623,8 +3709,11 @@ class _SiteCredentials extends _Credentials {
   _SiteCredentials(this.uri, realm, _HttpClientCredentials creds)
       : super(creds, realm);
 
-  bool applies(Uri uri, _AuthenticationScheme? scheme) {
+  bool applies(
+      Uri uri, _AuthenticationScheme? scheme, int? connectionHashCode) {
     if (scheme != null && credentials.scheme != scheme) return false;
+    if (this.connectionHashCode != null &&
+        this.connectionHashCode != connectionHashCode) return false;
     if (uri.host != this.uri.host) return false;
     int thisPort =
         this.uri.port == 0 ? HttpClient.defaultHttpPort : this.uri.port;
@@ -3639,6 +3728,13 @@ class _SiteCredentials extends _Credentials {
     if (credentials.scheme == _AuthenticationScheme.DIGEST && nonce == null) {
       return;
     }
+    // NTLM credentials can be used for one specific connection.
+    if (credentials.scheme == _AuthenticationScheme.NTLM &&
+        connectionHashCode != null &&
+        connectionHashCode !=
+            (request as _HttpClientRequest).connectionHashCode) {
+      return;
+    }
     credentials.authorize(this, request as _HttpClientRequest);
     used = true;
   }
@@ -3651,8 +3747,11 @@ class _ProxyCredentials extends _Credentials {
   _ProxyCredentials(this.host, this.port, realm, _HttpClientCredentials creds)
       : super(creds, realm);
 
-  bool applies(_Proxy proxy, _AuthenticationScheme? scheme) {
+  bool applies(
+      _Proxy proxy, _AuthenticationScheme? scheme, int? connectionHashCode) {
     if (scheme != null && credentials.scheme != scheme) return false;
+    if (this.connectionHashCode != null &&
+        this.connectionHashCode != connectionHashCode) return false;
     return proxy.host == host && proxy.port == port;
   }
 
@@ -3662,21 +3761,43 @@ class _ProxyCredentials extends _Credentials {
     if (credentials.scheme == _AuthenticationScheme.DIGEST && nonce == null) {
       return;
     }
+    // NTLM credentials can be used for one specific connection.
+    if (credentials.scheme == _AuthenticationScheme.NTLM &&
+        connectionHashCode != null &&
+        connectionHashCode !=
+            (request as _HttpClientRequest).connectionHashCode) {
+      return;
+    }
     credentials.authorizeProxy(this, request as _HttpClientRequest);
   }
 }
 
-abstract class _HttpClientCredentials implements HttpClientCredentials {
+abstract class _HttpClientCredentials implements HttpClientExCredentials {
+  static _HttpClientCredentials fromDartIo(HttpClientCredentials credentials) {
+    dynamic creds = credentials;
+    if (credentials is _HttpClientCredentials) {
+      return credentials;
+    } else if (credentials is HttpClientBasicCredentials) {
+      return _HttpClientExBasicCredentials(creds.username, creds.password);
+    } else if (credentials is HttpClientDigestCredentials) {
+      return _HttpClientExDigestCredentials(creds.username, creds.password);
+    } else {
+      throw UnsupportedError("${credentials.runtimeType} is not supported.");
+    }
+  }
+
   _AuthenticationScheme get scheme;
   void authorize(_Credentials credentials, _HttpClientRequest request);
-  void authorizeProxy(_ProxyCredentials credentials, HttpClientRequest request);
+  void authorizeProxy(
+      _ProxyCredentials credentials, _HttpClientRequest request);
 }
 
-final class _HttpClientBasicCredentials extends _HttpClientCredentials {
+final class _HttpClientExBasicCredentials extends _HttpClientCredentials
+    implements HttpClientExBasicCredentials {
   String username;
   String password;
 
-  _HttpClientBasicCredentials(this.username, this.password);
+  _HttpClientExBasicCredentials(this.username, this.password);
 
   _AuthenticationScheme get scheme => _AuthenticationScheme.BASIC;
 
@@ -3700,11 +3821,12 @@ final class _HttpClientBasicCredentials extends _HttpClientCredentials {
   }
 }
 
-final class _HttpClientDigestCredentials extends _HttpClientCredentials {
+final class _HttpClientExDigestCredentials extends _HttpClientCredentials
+    implements HttpClientExDigestCredentials {
   String username;
   String password;
 
-  _HttpClientDigestCredentials(this.username, this.password);
+  _HttpClientExDigestCredentials(this.username, this.password);
 
   _AuthenticationScheme get scheme => _AuthenticationScheme.DIGEST;
 
@@ -3775,6 +3897,48 @@ final class _HttpClientDigestCredentials extends _HttpClientCredentials {
   }
 }
 
+class _HttpClientNtlmCredentials extends _HttpClientCredentials
+    implements HttpClientExNtlmCredentials {
+  final NtlmCredentials credentials;
+
+  _HttpClientNtlmCredentials(this.credentials);
+
+  _AuthenticationScheme get scheme => _AuthenticationScheme.NTLM;
+
+  String authorization(_Credentials credentials, _HttpClientRequest request) {
+    if (credentials.used) {
+      credentials.securityContext?.dispose();
+      credentials.securityContext =
+          (credentials.credentials as _HttpClientNtlmCredentials)
+              .credentials
+              .initializeSecurityContext();
+      credentials.challenge = null;
+    }
+    credentials.used = true;
+    credentials.connectionHashCode = request.connectionHashCode;
+    request._httpClientConnection.currentSecurityContext =
+        credentials.securityContext;
+
+    final token =
+        credentials.securityContext!.getTokenBytes(credentials.challenge);
+    String auth = base64Encode(token);
+    return "NTLM $auth";
+  }
+
+  void authorize(_Credentials credentials, _HttpClientRequest request) {
+    if (!credentials.shouldAuthenticate) return;
+    request.headers.set(
+        HttpHeaders.authorizationHeader, authorization(credentials, request));
+  }
+
+  void authorizeProxy(
+      _ProxyCredentials credentials, _HttpClientRequest request) {
+    if (!credentials.shouldAuthenticate) return;
+    request.headers.set(HttpHeaders.proxyAuthorizationHeader,
+        authorization(credentials, request));
+  }
+}
+
 class _RedirectInfo implements RedirectInfo {
   final int statusCode;
   final String method;
@@ -3788,4 +3952,8 @@ String _getHttpVersion() {
   int index = version.indexOf('.', version.indexOf('.') + 1);
   version = version.substring(0, index);
   return 'Dart/$version (dart:io)';
+}
+
+extension on _HttpClientRequest {
+  int get connectionHashCode => _httpClientConnection.hashCode;
 }
