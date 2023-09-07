@@ -83,7 +83,7 @@ abstract class _HashBase {
   int _rotl32(int val, int shift) {
     var mod_shift = shift & 31;
     return ((val << mod_shift) & _MASK_32) |
-        ((val & _MASK_32) >> (32 - mod_shift));
+    ((val & _MASK_32) >> (32 - mod_shift));
   }
 
   // Compute the final result as a list of bytes from the hash words.

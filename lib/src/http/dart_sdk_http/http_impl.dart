@@ -4,10 +4,10 @@
 
 part of '../http.dart';
 
-abstract class HttpProfiler {
+abstract final class HttpProfiler {
   static const _kType = 'HttpProfile';
 
-  static final Map<int, _HttpProfileData> _profile = {};
+  static final Map<String, _HttpProfileData> _profile = {};
 
   static _HttpProfileData startRequest(
     String method,
@@ -19,7 +19,7 @@ abstract class HttpProfiler {
     return data;
   }
 
-  static _HttpProfileData? getHttpProfileRequest(int id) => _profile[id];
+  static _HttpProfileData? getHttpProfileRequest(String id) => _profile[id];
 
   static void clear() => _profile.clear();
 
@@ -63,7 +63,7 @@ class _HttpProfileData {
         ) {
     // Grab the ID from the timeline event so HTTP profile IDs can be matched
     // to the timeline.
-    id = _timeline.pass();
+    id = _timeline.pass().toString();
     requestInProgress = true;
     requestStartTimestamp = Timeline.now;
     _timeline.start('HTTP CLIENT $method', arguments: {
@@ -261,7 +261,7 @@ class _HttpProfileData {
   bool requestInProgress = true;
   bool? responseInProgress;
 
-  late final int id;
+  late final String id;
   final String method;
   final Uri uri;
 
@@ -289,7 +289,7 @@ class _HttpProfileData {
 int _nextServiceId = 1;
 
 // TODO(ajohnsen): Use other way of getting a unique id.
-abstract class _ServiceObject {
+mixin _ServiceObject {
   int __serviceId = 0;
   int get _serviceId {
     if (__serviceId == 0) __serviceId = _nextServiceId++;
@@ -528,6 +528,18 @@ class _HttpRequest extends _HttpInboundMessage implements HttpRequest {
   Uri get requestedUri {
     var requestedUri = _requestedUri;
     if (requestedUri != null) return requestedUri;
+
+    // `uri` can be an absoluteURI or an abs_path (RFC 2616 section 5.1.2).
+    // If `uri` is already absolute then use it as-is. Otherwise construct an
+    // absolute URI using `uri` and header information.
+
+    // RFC 3986 section 4.3 says that an absolute URI must have a scheme and
+    // cannot have a fragment. But any URI with a scheme is sufficient for the
+    // purpose of providing the `requestedUri`.
+    if (uri.hasScheme) {
+      return _requestedUri = uri;
+    }
+
     var proto = headers['x-forwarded-proto'];
     var scheme = proto != null
         ? proto.first
@@ -729,7 +741,7 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
     List<String>? challenge = headers[HttpHeaders.proxyAuthenticateHeader];
     return statusCode == HttpStatus.proxyAuthenticationRequired &&
         challenge != null &&
-        challenge.isNotEmpty;
+        challenge.length == 1;
   }
 
   bool get _shouldAuthenticate {
@@ -737,7 +749,7 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
     List<String>? challenge = headers[HttpHeaders.wwwAuthenticateHeader];
     return statusCode == HttpStatus.unauthorized &&
         challenge != null &&
-        challenge.isNotEmpty;
+        challenge.length == 1;
   }
 
   Future<HttpClientResponse> _authenticate(bool proxyAuth) {
@@ -760,13 +772,10 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
           : headers[HttpHeaders.wwwAuthenticateHeader];
     }
 
-    _Credentials? findCredentials(
-        _AuthenticationScheme scheme, int connectionHashCode) {
+    _Credentials? findCredentials(_AuthenticationScheme scheme) {
       return proxyAuth
-          ? _httpClient._findProxyCredentials(
-              _httpRequest._proxy, scheme, connectionHashCode)
-          : _httpClient._findCredentials(
-              _httpRequest.uri, scheme, connectionHashCode);
+          ? _httpClient._findProxyCredentials(_httpRequest._proxy, scheme)
+          : _httpClient._findCredentials(_httpRequest.uri, scheme);
     }
 
     void removeCredentials(_Credentials cr) {
@@ -798,26 +807,15 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
     }
 
     List<String> challenge = authChallenge()!;
-    assert(challenge.isNotEmpty);
-    late String rawHeader;
-    late _HeaderValue header;
-    _AuthenticationScheme scheme = _AuthenticationScheme.UNKNOWN;
-    String? realm;
-    for (final current in challenge) {
-      final currentHeader =
-          _HeaderValue.parse(current, parameterSeparator: ",");
-      final currentScheme =
-          _AuthenticationScheme.fromString(currentHeader.value);
-      if (currentScheme._scheme >= scheme._scheme) {
-        rawHeader = current;
-        header = currentHeader;
-        scheme = currentScheme;
-        realm = header.parameters["realm"];
-      }
-    }
+    assert(challenge.length == 1);
+    _HeaderValue header =
+        _HeaderValue.parse(challenge[0], parameterSeparator: ",");
+    _AuthenticationScheme scheme =
+        _AuthenticationScheme.fromString(header.value);
+    String? realm = header.parameters["realm"];
 
     // See if any matching credentials are available.
-    var cr = findCredentials(scheme, _httpRequest.connectionHashCode);
+    var cr = findCredentials(scheme);
     if (cr != null) {
       // For basic authentication don't retry already used credentials
       // as they must have already been added to the request causing
@@ -854,28 +852,6 @@ class _HttpClientResponse extends _HttpInboundMessageListInt
             }
           }
         }
-      }
-
-      if (cr.scheme == _AuthenticationScheme.NTLM) {
-        final priorChallenge = cr.challenge;
-        // Challenge is optional and whitespace separated from the scheme.
-        if (rawHeader.length > 5) {
-          final challengeBase64 = rawHeader.substring(5);
-          cr.challenge = base64Decode(challengeBase64.trim());
-        } else {
-          cr.challenge = null;
-        }
-        // An empty challenge returned after at least one non-empty challenge
-        // means that the credentials are invalid.
-        if (priorChallenge != null && cr.challenge == null) {
-          return Future.value(this);
-        }
-        // Mark credentials as unused so that security context can continue
-        // the flow.
-        cr.used = false;
-        cr.shouldAuthenticate = true;
-        // Credentials were found, prepare for retrying the request.
-        return retry();
       }
     }
 
@@ -1782,7 +1758,7 @@ class _HttpOutgoing implements StreamConsumer<List<int>> {
       return close();
     }
     // Use new stream so we are able to pause (see below listen). The
-    // alternative is to use stream.extand, but that won't give us a way of
+    // alternative is to use stream.expand, but that won't give us a way of
     // pausing.
     var controller = StreamController<List<int>>(sync: true);
 
@@ -2066,7 +2042,6 @@ class _HttpClientConnection {
   Timer? _idleTimer;
   bool closed = false;
   Uri? _currentUri;
-  NtlmSecurityContext? currentSecurityContext;
 
   Completer<_HttpIncoming>? _nextResponseCompleter;
   Future<Socket>? _streamFuture;
@@ -2102,13 +2077,19 @@ class _HttpClientConnection {
             message = error.message;
           } else if (error is SocketException) {
             message = error.message;
+          } else if (error is TlsException) {
+            message = error.message;
           } else {
             throw error;
           }
           _nextResponseCompleter!.completeError(
               HttpException(message, uri: _currentUri), stackTrace);
           _nextResponseCompleter = null;
-        }, test: (error) => error is HttpException || error is SocketException);
+        },
+            test: (error) =>
+                error is HttpException ||
+                error is SocketException ||
+                error is TlsException);
       } else {
         _nextResponseCompleter!.complete(incoming);
         _nextResponseCompleter = null;
@@ -2118,6 +2099,8 @@ class _HttpClientConnection {
       if (error is HttpException) {
         message = error.message;
       } else if (error is SocketException) {
+        message = error.message;
+      } else if (error is TlsException) {
         message = error.message;
       } else {
         throw error;
@@ -2170,8 +2153,7 @@ class _HttpClientConnection {
           base64Encode(utf8.encode("${proxy.username}:${proxy.password}"));
       request.headers.set(HttpHeaders.proxyAuthorizationHeader, "Basic $auth");
     } else if (!proxy.isDirect && _httpClient._proxyCredentials.isNotEmpty) {
-      proxyCreds = _httpClient._findProxyCredentials(
-          proxy, null, request.connectionHashCode);
+      proxyCreds = _httpClient._findProxyCredentials(proxy);
       if (proxyCreds != null) {
         proxyCreds.authorize(request);
       }
@@ -2249,21 +2231,6 @@ class _HttpClientConnection {
             if (nextnonce != null) creds.nonce = nextnonce;
           }
         }
-        // For NTLM authentication check if the server has authenticated us.
-        if (creds != null && creds.scheme == _AuthenticationScheme.NTLM) {
-          if (incoming.statusCode != null &&
-              incoming.statusCode != HttpStatus.unauthorized) {
-            creds.shouldAuthenticate = false;
-          }
-        }
-        // For NTLM authentication check if the proxy has authenticated us.
-        if (proxyCreds != null &&
-            proxyCreds.scheme == _AuthenticationScheme.NTLM) {
-          if (incoming.statusCode != null &&
-              incoming.statusCode != HttpStatus.proxyAuthenticationRequired) {
-            proxyCreds.shouldAuthenticate = false;
-          }
-        }
         request._onIncoming(incoming);
       })
           // If we see a state error, we failed to get the 'first'
@@ -2296,32 +2263,28 @@ class _HttpClientConnection {
     closed = true;
     _httpClient._connectionClosed(this);
     _socket.destroy();
-    currentSecurityContext?.dispose();
   }
 
   void destroyFromExternal() {
     closed = true;
     _httpClient._connectionClosedNoFurtherClosing(this);
     _socket.destroy();
-    currentSecurityContext?.dispose();
   }
 
   void close() {
     closed = true;
     _httpClient._connectionClosed(this);
-    _streamFuture!.timeout(_httpClient.idleTimeout).then((_) {
-      _socket.destroy();
-      currentSecurityContext?.dispose();
-    });
+    _streamFuture!
+        .timeout(_httpClient.idleTimeout)
+        .then((_) => _socket.destroy());
   }
 
   void closeFromExternal() {
     closed = true;
     _httpClient._connectionClosedNoFurtherClosing(this);
-    _streamFuture!.timeout(_httpClient.idleTimeout).then((_) {
-      _socket.destroy();
-      currentSecurityContext?.dispose();
-    });
+    _streamFuture!
+        .timeout(_httpClient.idleTimeout)
+        .then((_) => _socket.destroy());
   }
 
   Future<_HttpClientConnection> createProxyTunnel(
@@ -2554,26 +2517,24 @@ class _ConnectionTarget {
           return _ConnectionInfo(connection, proxy);
         }
       }, onError: (error) {
-        // When there is a timeout, there is a race in which the connectionTask
-        // Future won't be completed with an error before the socketFuture here
-        // is completed with a TimeoutException by the onTimeout callback above.
-        // In this case, propagate a SocketException as specified by the
-        // HttpClient.connectionTimeout docs.
+        _connecting--;
+        _socketTasks.remove(task);
+        _checkPending();
+        // When there is a timeout, cancel the ConnectionTask and propagate a
+        // SocketException as specified by the HttpClient.connectionTimeout
+        // docs.
         if (error is TimeoutException) {
           assert(connectionTimeout != null);
-          _connecting--;
-          _socketTasks.remove(task);
           task.cancel();
           throw SocketException(
               "HTTP connection timed out after $connectionTimeout, "
               "host: $host, port: $port");
         }
-        _socketTasks.remove(task);
-        _checkPending();
         throw error;
       });
     }, onError: (error) {
       _connecting--;
+      _checkPending();
       throw error;
     });
   }
@@ -2595,8 +2556,7 @@ class _HttpClient implements HttpClientEx {
   Future<bool> Function(Uri, String scheme, String? realm)? _authenticate;
   Future<bool> Function(String host, int port, String scheme, String? realm)?
       _authenticateProxy;
-  FutureOr<String> Function(Uri)? _findProxy =
-      HttpClient.findProxyFromEnvironment;
+  String Function(Uri)? _findProxy = HttpClient.findProxyFromEnvironment;
   Duration _idleTimeout = const Duration(seconds: 15);
   BadCertificateCallback? _badCertificateCallback;
   Function(String line)? _keyLog;
@@ -2706,11 +2666,6 @@ class _HttpClient implements HttpClientEx {
   }
 
   void addCredentials(Uri url, String realm, HttpClientCredentials cr) {
-    addCredentialsEx(url, realm, _HttpClientCredentials.fromDartIo(cr));
-  }
-
-  @override
-  void addCredentialsEx(Uri url, String realm, HttpClientExCredentials cr) {
     _credentials
         .add(_SiteCredentials(url, realm, cr as _HttpClientCredentials));
   }
@@ -2724,12 +2679,6 @@ class _HttpClient implements HttpClientEx {
 
   void addProxyCredentials(
       String host, int port, String realm, HttpClientCredentials cr) {
-    addProxyCredentialsEx(
-        host, port, realm, _HttpClientCredentials.fromDartIo(cr));
-  }
-
-  void addProxyCredentialsEx(
-      String host, int port, String realm, HttpClientExCredentials cr) {
     _proxyCredentials.add(
         _ProxyCredentials(host, port, realm, cr as _HttpClientCredentials));
   }
@@ -2741,8 +2690,6 @@ class _HttpClient implements HttpClientEx {
       _connectionFactory = f;
 
   set findProxy(String Function(Uri uri)? f) => _findProxy = f;
-
-  set findProxyAsync(FutureOr<String> Function(Uri url)? f) => _findProxy = f;
 
   static void _startRequestTimelineEvent(
       TimelineTask? timeline, String method, Uri uri) {
@@ -2786,7 +2733,7 @@ class _HttpClient implements HttpClientEx {
     return true;
   }
 
-  Future<_HttpClientRequest> _openUrl(String method, Uri uri) async {
+  Future<_HttpClientRequest> _openUrl(String method, Uri uri) {
     if (_closing) {
       throw StateError("Client is closed");
     }
@@ -2825,8 +2772,7 @@ class _HttpClient implements HttpClientEx {
       // TODO(sgjesse): Keep a map of these as normally only a few
       // configuration strings will be used.
       try {
-        var proxy = findProxy(uri);
-        proxyConf = _ProxyConfiguration(proxy is String ? proxy : await proxy);
+        proxyConf = _ProxyConfiguration(findProxy(uri));
       } catch (error, stackTrace) {
         return Future.error(error, stackTrace);
       }
@@ -2983,13 +2929,12 @@ class _HttpClient implements HttpClientEx {
     return connect(HttpException("No proxies given"), StackTrace.current);
   }
 
-  _SiteCredentials? _findCredentials(Uri url,
-      [_AuthenticationScheme? scheme, int? connectionHashCode]) {
+  _SiteCredentials? _findCredentials(Uri url, [_AuthenticationScheme? scheme]) {
     // Look for credentials.
     _SiteCredentials? cr =
         _credentials.fold(null, (_SiteCredentials? prev, value) {
       var siteCredentials = value as _SiteCredentials;
-      if (siteCredentials.applies(url, scheme, connectionHashCode)) {
+      if (siteCredentials.applies(url, scheme)) {
         if (prev == null) return value;
         return siteCredentials.uri.path.length > prev.uri.path.length
             ? siteCredentials
@@ -3002,10 +2947,10 @@ class _HttpClient implements HttpClientEx {
   }
 
   _ProxyCredentials? _findProxyCredentials(_Proxy proxy,
-      [_AuthenticationScheme? scheme, int? connectionHashCode]) {
+      [_AuthenticationScheme? scheme]) {
     // Look for credentials.
     for (var current in _proxyCredentials) {
-      if (current.applies(proxy, scheme, connectionHashCode)) {
+      if (current.applies(proxy, scheme)) {
         return current;
       }
     }
@@ -3093,7 +3038,7 @@ class _HttpClient implements HttpClientEx {
       Platform.environment;
 }
 
-class _HttpConnection extends LinkedListEntry<_HttpConnection>
+final class _HttpConnection extends LinkedListEntry<_HttpConnection>
     with _ServiceObject {
   static const _ACTIVE = 0;
   static const _IDLE = 1;
@@ -3211,7 +3156,8 @@ class _HttpConnection extends LinkedListEntry<_HttpConnection>
 
 // Common interface of [ServerSocket] and [SecureServerSocket] used by
 // [_HttpServer].
-abstract class ServerSocketBase<T extends Socket> implements Stream<T> {
+abstract interface class ServerSocketBase<T extends Socket>
+    implements Stream<T> {
   int get port;
   InternetAddress get address;
   Future<void> close();
@@ -3230,34 +3176,34 @@ class _HttpServer extends Stream<HttpRequest>
 
   Duration? _idleTimeout;
   Timer? _idleTimer;
-  /*
-  static Future<HttpServer> bind(
-      address, int port, int backlog, bool v6Only, bool shared) {
-    return ServerSocket.bind(address, port,
-            backlog: backlog, v6Only: v6Only, shared: shared)
-        .then<HttpServer>((socket) {
-      return _HttpServer._(socket, true);
-    });
-  }
 
-  static Future<HttpServer> bindSecure(
-      address,
-      int port,
-      SecurityContext? context,
-      int backlog,
-      bool v6Only,
-      bool requestClientCertificate,
-      bool shared) {
-    return SecureServerSocket.bind(address, port, context,
-            backlog: backlog,
-            v6Only: v6Only,
-            requestClientCertificate: requestClientCertificate,
-            shared: shared)
-        .then<HttpServer>((socket) {
-      return _HttpServer._(socket, true);
-    });
-  }
-  */
+  // static Future<HttpServer> bind(
+  //     address, int port, int backlog, bool v6Only, bool shared) {
+  //   return ServerSocket.bind(address, port,
+  //       backlog: backlog, v6Only: v6Only, shared: shared)
+  //       .then<HttpServer>((socket) {
+  //     return _HttpServer._(socket, true);
+  //   });
+  // }
+  //
+  // static Future<HttpServer> bindSecure(
+  //     address,
+  //     int port,
+  //     SecurityContext? context,
+  //     int backlog,
+  //     bool v6Only,
+  //     bool requestClientCertificate,
+  //     bool shared) {
+  //   return SecureServerSocket.bind(address, port, context,
+  //       backlog: backlog,
+  //       v6Only: v6Only,
+  //       requestClientCertificate: requestClientCertificate,
+  //       shared: shared)
+  //       .then<HttpServer>((socket) {
+  //     return _HttpServer._(socket, true);
+  //   });
+  // }
+
   _HttpServer._(this._serverSocket, this._closeServer)
       : _controller = StreamController<HttpRequest>(sync: true) {
     _controller.onCancel = close;
@@ -3619,21 +3565,18 @@ class _AuthenticationScheme {
   static const UNKNOWN = _AuthenticationScheme(-1);
   static const BASIC = _AuthenticationScheme(0);
   static const DIGEST = _AuthenticationScheme(1);
-  static const NTLM = _AuthenticationScheme(2);
 
   const _AuthenticationScheme(this._scheme);
 
   factory _AuthenticationScheme.fromString(String scheme) {
     if (scheme.toLowerCase() == "basic") return BASIC;
     if (scheme.toLowerCase() == "digest") return DIGEST;
-    if (scheme.toLowerCase() == "ntlm") return NTLM;
     return UNKNOWN;
   }
 
   String toString() {
     if (this == BASIC) return "Basic";
     if (this == DIGEST) return "Digest";
-    if (this == NTLM) return "NTLM";
     return "Unknown";
   }
 }
@@ -3650,12 +3593,6 @@ abstract class _Credentials {
   String? qop;
   int? nonceCount;
 
-  // NTLM specific fields
-  int? connectionHashCode;
-  NtlmSecurityContext? securityContext;
-  bool shouldAuthenticate = true;
-  Uint8List? challenge;
-
   _Credentials(this.credentials, this.realm) {
     if (credentials.scheme == _AuthenticationScheme.DIGEST) {
       // Calculate the H(A1) value once. There is no mentioning of
@@ -3664,7 +3601,7 @@ abstract class _Credentials {
       // the WWW-Authenticate and Proxy-Authenticate headers, see
       // http://tools.ietf.org/html/draft-reschke-basicauth-enc-06. For
       // now always use UTF-8 encoding.
-      var creds = credentials as _HttpClientExDigestCredentials;
+      var creds = credentials as _HttpClientDigestCredentials;
       var hasher = _MD5()
         ..add(utf8.encode(creds.username))
         ..add([_CharCode.COLON])
@@ -3672,10 +3609,6 @@ abstract class _Credentials {
         ..add([_CharCode.COLON])
         ..add(utf8.encode(creds.password));
       ha1 = _CryptoUtils.bytesToHex(hasher.close());
-    }
-    if (credentials.scheme == _AuthenticationScheme.NTLM) {
-      final creds = credentials as _HttpClientNtlmCredentials;
-      securityContext = creds.credentials.initializeSecurityContext();
     }
   }
 
@@ -3690,11 +3623,8 @@ class _SiteCredentials extends _Credentials {
   _SiteCredentials(this.uri, realm, _HttpClientCredentials creds)
       : super(creds, realm);
 
-  bool applies(
-      Uri uri, _AuthenticationScheme? scheme, int? connectionHashCode) {
+  bool applies(Uri uri, _AuthenticationScheme? scheme) {
     if (scheme != null && credentials.scheme != scheme) return false;
-    if (this.connectionHashCode != null &&
-        this.connectionHashCode != connectionHashCode) return false;
     if (uri.host != this.uri.host) return false;
     int thisPort =
         this.uri.port == 0 ? HttpClient.defaultHttpPort : this.uri.port;
@@ -3709,13 +3639,6 @@ class _SiteCredentials extends _Credentials {
     if (credentials.scheme == _AuthenticationScheme.DIGEST && nonce == null) {
       return;
     }
-    // NTLM credentials can be used for one specific connection.
-    if (credentials.scheme == _AuthenticationScheme.NTLM &&
-        connectionHashCode != null &&
-        connectionHashCode !=
-            (request as _HttpClientRequest).connectionHashCode) {
-      return;
-    }
     credentials.authorize(this, request as _HttpClientRequest);
     used = true;
   }
@@ -3728,11 +3651,8 @@ class _ProxyCredentials extends _Credentials {
   _ProxyCredentials(this.host, this.port, realm, _HttpClientCredentials creds)
       : super(creds, realm);
 
-  bool applies(
-      _Proxy proxy, _AuthenticationScheme? scheme, int? connectionHashCode) {
+  bool applies(_Proxy proxy, _AuthenticationScheme? scheme) {
     if (scheme != null && credentials.scheme != scheme) return false;
-    if (this.connectionHashCode != null &&
-        this.connectionHashCode != connectionHashCode) return false;
     return proxy.host == host && proxy.port == port;
   }
 
@@ -3742,43 +3662,21 @@ class _ProxyCredentials extends _Credentials {
     if (credentials.scheme == _AuthenticationScheme.DIGEST && nonce == null) {
       return;
     }
-    // NTLM credentials can be used for one specific connection.
-    if (credentials.scheme == _AuthenticationScheme.NTLM &&
-        connectionHashCode != null &&
-        connectionHashCode !=
-            (request as _HttpClientRequest).connectionHashCode) {
-      return;
-    }
     credentials.authorizeProxy(this, request as _HttpClientRequest);
   }
 }
 
-abstract class _HttpClientCredentials implements HttpClientExCredentials {
-  static _HttpClientCredentials fromDartIo(HttpClientCredentials credentials) {
-    dynamic creds = credentials;
-    if (credentials is _HttpClientCredentials) {
-      return credentials;
-    } else if (credentials is HttpClientBasicCredentials) {
-      return _HttpClientExBasicCredentials(creds.username, creds.password);
-    } else if (credentials is HttpClientDigestCredentials) {
-      return _HttpClientExDigestCredentials(creds.username, creds.password);
-    } else {
-      throw UnsupportedError("${credentials.runtimeType} is not supported.");
-    }
-  }
-
+abstract class _HttpClientCredentials implements HttpClientCredentials {
   _AuthenticationScheme get scheme;
   void authorize(_Credentials credentials, _HttpClientRequest request);
-  void authorizeProxy(
-      _ProxyCredentials credentials, _HttpClientRequest request);
+  void authorizeProxy(_ProxyCredentials credentials, HttpClientRequest request);
 }
 
-class _HttpClientExBasicCredentials extends _HttpClientCredentials
-    implements HttpClientExBasicCredentials {
+final class _HttpClientBasicCredentials extends _HttpClientCredentials {
   String username;
   String password;
 
-  _HttpClientExBasicCredentials(this.username, this.password);
+  _HttpClientBasicCredentials(this.username, this.password);
 
   _AuthenticationScheme get scheme => _AuthenticationScheme.BASIC;
 
@@ -3802,12 +3700,11 @@ class _HttpClientExBasicCredentials extends _HttpClientCredentials
   }
 }
 
-class _HttpClientExDigestCredentials extends _HttpClientCredentials
-    implements HttpClientExDigestCredentials {
+final class _HttpClientDigestCredentials extends _HttpClientCredentials {
   String username;
   String password;
 
-  _HttpClientExDigestCredentials(this.username, this.password);
+  _HttpClientDigestCredentials(this.username, this.password);
 
   _AuthenticationScheme get scheme => _AuthenticationScheme.DIGEST;
 
@@ -3878,48 +3775,6 @@ class _HttpClientExDigestCredentials extends _HttpClientCredentials
   }
 }
 
-class _HttpClientNtlmCredentials extends _HttpClientCredentials
-    implements HttpClientExNtlmCredentials {
-  final NtlmCredentials credentials;
-
-  _HttpClientNtlmCredentials(this.credentials);
-
-  _AuthenticationScheme get scheme => _AuthenticationScheme.NTLM;
-
-  String authorization(_Credentials credentials, _HttpClientRequest request) {
-    if (credentials.used) {
-      credentials.securityContext?.dispose();
-      credentials.securityContext =
-          (credentials.credentials as _HttpClientNtlmCredentials)
-              .credentials
-              .initializeSecurityContext();
-      credentials.challenge = null;
-    }
-    credentials.used = true;
-    credentials.connectionHashCode = request.connectionHashCode;
-    request._httpClientConnection.currentSecurityContext =
-        credentials.securityContext;
-
-    final token =
-        credentials.securityContext!.getTokenBytes(credentials.challenge);
-    String auth = base64Encode(token);
-    return "NTLM $auth";
-  }
-
-  void authorize(_Credentials credentials, _HttpClientRequest request) {
-    if (!credentials.shouldAuthenticate) return;
-    request.headers.set(
-        HttpHeaders.authorizationHeader, authorization(credentials, request));
-  }
-
-  void authorizeProxy(
-      _ProxyCredentials credentials, _HttpClientRequest request) {
-    if (!credentials.shouldAuthenticate) return;
-    request.headers.set(HttpHeaders.proxyAuthorizationHeader,
-        authorization(credentials, request));
-  }
-}
-
 class _RedirectInfo implements RedirectInfo {
   final int statusCode;
   final String method;
@@ -3933,8 +3788,4 @@ String _getHttpVersion() {
   int index = version.indexOf('.', version.indexOf('.') + 1);
   version = version.substring(0, index);
   return 'Dart/$version (dart:io)';
-}
-
-extension on _HttpClientRequest {
-  int get connectionHashCode => _httpClientConnection.hashCode;
 }

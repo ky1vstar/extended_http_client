@@ -298,8 +298,8 @@ class _HttpParser extends Stream<_HttpIncoming> {
   StreamSubscription<_HttpIncoming> listen(
       void Function(_HttpIncoming event)? onData,
       {Function? onError,
-      void Function()? onDone,
-      bool? cancelOnError}) {
+        void Function()? onDone,
+        bool? cancelOnError}) {
     return _controller.stream.listen(onData,
         onError: onError, onDone: onDone, cancelOnError: cancelOnError);
   }
@@ -814,7 +814,7 @@ class _HttpParser extends Stream<_HttpIncoming> {
           break;
 
         case _State.BODY:
-          // The body is not handled one byte at a time but in blocks.
+        // The body is not handled one byte at a time but in blocks.
           _index = _index - 1;
           var buffer = _buffer!;
           int dataAvailable = buffer.length - _index;
@@ -842,12 +842,12 @@ class _HttpParser extends Stream<_HttpIncoming> {
           break;
 
         case _State.FAILURE:
-          // Should be unreachable.
+        // Should be unreachable.
           assert(false);
           break;
 
         default:
-          // Should be unreachable.
+        // Should be unreachable.
           assert(false);
           break;
       }
@@ -1105,7 +1105,7 @@ class _HttpParser extends Stream<_HttpIncoming> {
     assert(!_bodyPaused);
     var controller = _bodyController = StreamController<Uint8List>(sync: true);
     var incoming =
-        _incoming = _HttpIncoming(_headers!, transferLength, controller.stream);
+    _incoming = _HttpIncoming(_headers!, transferLength, controller.stream);
     controller
       ..onListen = () {
         if (incoming != _incoming) return;
