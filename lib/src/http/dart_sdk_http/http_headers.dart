@@ -25,7 +25,7 @@ class _HttpHeaders implements HttpHeaders {
 
   _HttpHeaders(this.protocolVersion,
       {int defaultPortForScheme = HttpClient.defaultHttpPort,
-      _HttpHeaders? initialHeaders})
+        _HttpHeaders? initialHeaders})
       : _headers = HashMap<String, List<String>>(),
         _defaultPortForScheme = defaultPortForScheme {
     if (initialHeaders != null) {
@@ -143,7 +143,7 @@ class _HttpHeaders implements HttpHeaders {
         if (_contentLength < 0) {
           throw HttpException(
               "Trying to set 'Connection: Keep-Alive' on HTTP 1.0 headers with "
-              "no ContentLength");
+                  "no ContentLength");
         }
         add(originalName, "keep-alive", preserveHeaderCase: true);
       }
@@ -166,7 +166,7 @@ class _HttpHeaders implements HttpHeaders {
         contentLength == -1) {
       throw HttpException(
           "Trying to clear ContentLength on HTTP 1.0 headers with "
-          "'Connection: Keep-Alive' set");
+              "'Connection: Keep-Alive' set");
     }
     if (_contentLength == contentLength) return;
     _contentLength = contentLength;
@@ -696,8 +696,8 @@ class _HeaderValue implements HeaderValue {
 
   static _HeaderValue parse(String value,
       {String parameterSeparator = ";",
-      String? valueSeparator,
-      bool preserveBackslash = false}) {
+        String? valueSeparator,
+        bool preserveBackslash = false}) {
     // Parse the string.
     var result = _HeaderValue();
     result._parse(value, parameterSeparator, valueSeparator, preserveBackslash);
@@ -949,6 +949,7 @@ class _Cookie implements Cookie {
   String? _path;
   bool httpOnly = false;
   bool secure = false;
+  SameSite? sameSite;
 
   _Cookie(String name, String value)
       : _name = _validateName(name),
@@ -1044,6 +1045,14 @@ class _Cookie implements Cookie {
           httpOnly = true;
         } else if (name == "secure") {
           secure = true;
+        } else if (name == "samesite") {
+          sameSite = switch (value) {
+            "lax" => SameSite.lax,
+            "none" => SameSite.none,
+            "strict" => SameSite.strict,
+            _ => throw HttpException(
+                'SameSite value should be one of Lax, Strict or None.')
+          };
         }
         if (!done()) index++; // Skip the ; character
       }
@@ -1089,6 +1098,8 @@ class _Cookie implements Cookie {
     }
     if (secure) sb.write("; Secure");
     if (httpOnly) sb.write("; HttpOnly");
+    if (sameSite != null) sb.write("; $sameSite");
+
     return sb.toString();
   }
 
